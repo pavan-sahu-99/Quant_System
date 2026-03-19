@@ -1,8 +1,0 @@
-pandas
-matplotlib
-streamlit
-requests
-selenium
-kiteconnect
-upstox-python-sdk
-
