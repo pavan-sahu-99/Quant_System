@@ -7,6 +7,13 @@ import numpy as np
 import sqlite3
 from database_organizers.db_read import get_candles_db
 
+
+RESAMPLE_MAP = {
+    '1min': '1T',
+    '3min': '3T',
+    '5min': '5T',
+}
+
 def trix(price: pd.Series, length: int = 14) -> pd.Series:
     """
     TRIX indicator
@@ -29,33 +36,41 @@ def trix(price: pd.Series, length: int = 14) -> pd.Series:
     return trix_val
 
 def rsi(price: pd.Series, length: int = 14) -> pd.Series:
-    """
-    Smoothed RSI
-    :param price: pd.Series of prices
-    :param length: period
-    :return: RSI series
-    """
-
     delta = price.diff()
 
-    # Initialize
-    avg_gain = pd.Series(0.0, index=price.index)
-    avg_loss = pd.Series(0.0, index=price.index)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
 
-    # First value (like your CurrentBar == 1 block)
-    avg_gain.iloc[length] = delta.iloc[1:length+1].mean()
-    avg_loss.iloc[length] = delta.iloc[1:length+1].abs().mean()
+    gain = pd.Series(gain, index=price.index)
+    loss = pd.Series(loss, index=price.index)
 
-    # Wilder smoothing
-    for i in range(length + 1, len(price)):
-        avg_gain.iloc[i] = avg_gain.iloc[i-1] + (delta.iloc[i] - avg_gain.iloc[i-1]) / length
-        avg_loss.iloc[i] = avg_loss.iloc[i-1] + (abs(delta.iloc[i]) - avg_loss.iloc[i-1]) / length
+    avg_gain = gain.ewm(alpha=1/length, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1/length, adjust=False).mean()
 
     rs = avg_gain / avg_loss.replace(0, np.nan)
 
-    rsi_val = 50 * (rs + 1)
+    return 100 - (100 / (1 + rs))
 
-    return rsi_val
+def resample_df(df: pd.DataFrame, tf: str = '3min') -> pd.DataFrame:
+    df = df.copy()
+    df['timestamp'] = pd.to_datetime(df['timestamp'])
+
+    df = df.set_index('timestamp')
+
+    tf_resample = RESAMPLE_MAP[tf]
+
+    df = df.resample(tf_resample, closed='left', label='left').agg({
+        'open': 'first',
+        'high': 'max',
+        'low': 'min',
+        'close': 'last',
+        'ltp': 'last',
+        'instrument_key': 'first',
+    })
+    df['timeframe'] = tf
+    df = df.dropna().reset_index()
+    return df
+
 
 def generate_signals(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -96,8 +111,8 @@ def generate_signals(df: pd.DataFrame) -> pd.DataFrame:
 
     raw_signal[rsi_cross_up_oversold]      =  1   # RSI → LONG
     raw_signal[rsi_cross_down_overbought]  = -1   # RSI → SHORT
-    raw_signal[trix_cross_up]              =  1   # TRIX → LONG  (overwrites RSI)
-    raw_signal[trix_cross_down]            = -1   # TRIX → SHORT (overwrites RSI)
+    raw_signal[trix_cross_up]              =  1   # TRIX → LONG  
+    raw_signal[trix_cross_down]            = -1   # TRIX → SHORT
 
     # hold last signal until a new one fires
     # Replace 0s with NaN so ffill carries the last non-zero signal forward
@@ -107,10 +122,12 @@ def generate_signals(df: pd.DataFrame) -> pd.DataFrame:
 
     return df
 
+
 if __name__ == "__main__":
     df = get_candles_db()
+    df = resample_df(df, tf='3min')
     df['trix'] = trix(df['close'], length=9)
-    df['rsi']  = rsi(df['close'],  length=15)
+    df['rsi']  = rsi(df['close'], length=15)
     df = generate_signals(df)
     df = df[['instrument_key', 'timestamp', 'open', 'high', 'low', 'close',
              'ltp', 'trix', 'rsi', 'signal', 'timeframe']]
